@@ -1,11 +1,15 @@
-"""Statuses, reasons and result types (PLAN §6.1, §10, §11)."""
+"""Statuses, reasons, results and persisted records (PLAN §6.1, §10, §11).
+
+The ``*Record`` models are what the repository returns: plain pydantic objects, so
+no SQLAlchemy session or lazy loading leaks past the store.
+"""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
 from harness.domain.errors import ToolError
 
@@ -137,3 +141,88 @@ class ToolResult(BaseModel):
             attempts=attempts,
             duration_ms=duration_ms,
         )
+
+
+# ---------------------------------------------------------------- persisted records
+
+MessageRole = Literal["system", "user", "assistant", "tool"]
+
+
+class _Record(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PendingToolCall(BaseModel):
+    """The one tool call a paused run is waiting on. Its ``args`` are what gets
+    executed on approval (P4): the model is not asked to produce them again."""
+
+    tool_call_id: str
+    tool_name: str
+    args: dict[str, Any]
+    approval_id: str
+
+
+class RunRecord(_Record):
+    """A run's persisted state. The loop mutates a copy and saves it back (P2)."""
+
+    id: str
+    objective: str
+    status: RunStatus
+    termination_reason: TerminationReason | None = None
+    final_answer: str | None = None
+    step_count: int = 0
+    active_elapsed_ms: int = 0
+    consecutive_tool_errors: int = 0
+    consecutive_malformed: int = 0
+    pending_tool_call: PendingToolCall | None = None
+    config: dict[str, Any]
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+    completed_at: AwareDatetime | None = None
+
+
+class MessageRecord(_Record):
+    run_id: str
+    seq: int
+    role: MessageRole
+    content: str | None
+    tool_calls: list[dict[str, Any]] | None
+    tool_call_id: str | None
+    created_at: AwareDatetime
+
+
+class ToolCallRecord(_Record):
+    run_id: str
+    step: int
+    tool_call_id: str
+    tool_name: str
+    args: dict[str, Any] | None
+    args_hash: str | None
+    status: ToolCallStatus
+    result: dict[str, Any] | None
+    error_type: str | None
+    attempts: int
+    duration_ms: int
+    created_at: AwareDatetime
+
+
+class ApprovalRecord(_Record):
+    id: str
+    run_id: str
+    tool_call_id: str
+    tool_name: str
+    args: dict[str, Any]
+    status: ApprovalStatus
+    reason: str | None
+    decided_by: str | None
+    requested_at: AwareDatetime
+    decided_at: AwareDatetime | None
+
+
+class EventRecord(_Record):
+    run_id: str
+    seq: int
+    ts: AwareDatetime
+    type: EventType
+    step: int | None
+    payload: dict[str, Any]

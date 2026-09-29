@@ -5,7 +5,11 @@ from typing import Any
 
 from harness.clock import Clock
 from harness.domain.models import EventType, Severity
-from harness.tools.incidents import IncidentRecord, format_incident_id
+from harness.tools.incidents import (
+    IdempotencyKeyConflictError,
+    IncidentRecord,
+    format_incident_id,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,8 @@ class InMemoryIncidentStore:
     async def create(
         self, *, idempotency_key: str, title: str, description: str, severity: Severity
     ) -> IncidentRecord:
+        if idempotency_key in self.records:
+            raise IdempotencyKeyConflictError(idempotency_key)
         record = IncidentRecord(
             incident_id=format_incident_id(len(self.records) + 1),
             title=title,

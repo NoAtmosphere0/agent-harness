@@ -152,3 +152,18 @@ async def test_timeout_after_commit_retry_returns_original_incident(
     assert result.data is not None
     assert result.data["deduplicated"] is True
     assert len(incident_store.records) == 1
+
+
+async def test_fault_injector_clear_run_forgets_faults_and_counters():
+    injector = FaultInjector()
+    injector.set_run_faults("run-1", {"stub": FlakyFault(mode="flaky", fail_times=1)})
+    injector.set_run_faults("run-2", {"stub": FlakyFault(mode="flaky", fail_times=1)})
+    handler = injector.wrap(_spec())
+    with pytest.raises(ToolTransientError):
+        await handler(_In(), _ctx("run-1"))
+
+    injector.clear_run("run-1")
+
+    assert await handler(_In(), _ctx("run-1")) == {"ok": True}  # no fault any more
+    with pytest.raises(ToolTransientError):  # other runs untouched
+        await handler(_In(), _ctx("run-2"))

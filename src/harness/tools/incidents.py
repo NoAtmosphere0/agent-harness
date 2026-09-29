@@ -4,7 +4,8 @@ The only side-effecting tool. Two guarantees live here rather than in the loop:
 
 * it refuses to run without a harness-generated idempotency key, which only the
   approved-execution path provides (P3, defence in depth behind the approval gate);
-* a repeated key returns the original incident instead of creating another (P6).
+* a repeated key returns the original incident instead of creating another (P6),
+  including when two calls race past the lookup and one loses on the unique key.
 """
 
 from __future__ import annotations
@@ -13,11 +14,16 @@ from typing import Any, Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from harness.domain.errors import ToolPermanentError
+from harness.domain.errors import HarnessError, ToolPermanentError, ToolTransientError
 from harness.domain.models import Severity
 from harness.tools.spec import RetryPolicy, ToolContext, ToolSpec
 
 TOOL_NAME = "create_incident"
+
+
+class IdempotencyKeyConflictError(HarnessError):
+    """Raised by an ``IncidentStore`` when another call already created an incident
+    with this key. Keeps storage-specific errors (e.g. IntegrityError) out of the tool."""
 
 
 def format_incident_id(number: int) -> str:
@@ -64,7 +70,9 @@ class IncidentStore(Protocol):
 
     async def create(
         self, *, idempotency_key: str, title: str, description: str, severity: Severity
-    ) -> IncidentRecord: ...
+    ) -> IncidentRecord:
+        """Insert a new incident. Raises ``IdempotencyKeyConflictError`` if the key exists."""
+        ...
 
 
 def make_create_incident_tool(store: IncidentStore, retry: RetryPolicy) -> ToolSpec:
@@ -80,12 +88,22 @@ def make_create_incident_tool(store: IncidentStore, retry: RetryPolicy) -> ToolS
         existing = await store.get_by_idempotency_key(key)
         if existing is not None:
             return _output(existing, deduplicated=True)
-        record = await store.create(
-            idempotency_key=key,
-            title=args.title,
-            description=args.description,
-            severity=args.severity,
-        )
+        try:
+            record = await store.create(
+                idempotency_key=key,
+                title=args.title,
+                description=args.description,
+                severity=args.severity,
+            )
+        except IdempotencyKeyConflictError:
+            # P6: a concurrent call with the same key committed between our lookup and
+            # insert. The unique constraint stopped the duplicate; return its incident.
+            winner = await store.get_by_idempotency_key(key)
+            if winner is None:
+                raise ToolTransientError(
+                    TOOL_NAME, "idempotency conflict but no incident found; retry"
+                ) from None
+            return _output(winner, deduplicated=True)
         return _output(record, deduplicated=False)
 
     return ToolSpec(

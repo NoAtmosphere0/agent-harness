@@ -84,6 +84,12 @@ class FaultInjector:
     def set_run_faults(self, run_id: str, faults: Mapping[str, Fault]) -> None:
         self._run_faults[run_id] = dict(faults)
 
+    def clear_run(self, run_id: str) -> None:
+        """Forget a finished run's faults and call counters so they don't accumulate."""
+        self._run_faults.pop(run_id, None)
+        for key in [k for k in self._calls if k[0] == run_id]:
+            del self._calls[key]
+
     def wrap(self, spec: ToolSpec) -> ToolHandler:
         """Return ``spec.handler``, with the run's fault (if any) applied around it."""
 

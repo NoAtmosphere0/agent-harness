@@ -56,10 +56,16 @@ def configure_logging(level: LogLevel = "INFO", fmt: LogFormat = "json") -> None
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelNamesMapping()[level]),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=_stderr_logger,
         # Not cached, so reconfiguring (e.g. in tests) affects existing loggers.
         cache_logger_on_first_use=False,
     )
+
+
+def _stderr_logger(*_args: Any) -> structlog.PrintLogger:
+    # Resolve sys.stderr per logger rather than once at configure time, so a stream
+    # that was swapped out and closed (e.g. by pytest's capture) is never written to.
+    return structlog.PrintLogger(sys.stderr)
 
 
 def get_logger(**initial_values: Any) -> FilteringBoundLogger:
