@@ -72,6 +72,40 @@ class ScriptedLLM:
         )
 
 
+class ReplayLLM:
+    """Stateless scripted client for ``LLM_PROVIDER=scripted`` (server, CLI, demo).
+
+    The step is picked from the number of assistant messages already in the
+    conversation, not from an internal cursor. Any number of runs can therefore
+    replay the same script at once, and a run that paused for approval continues
+    at the right step when it resumes, even in a new process. Past the end of the
+    script it answers with a fixed final message, so a run always completes.
+    """
+
+    model_name = "scripted"
+
+    def __init__(self, steps: Iterable[ScriptStep]) -> None:
+        self._steps = list(steps)
+
+    async def complete(
+        self, messages: list[ChatMessage], tools: list[dict[str, Any]], timeout_s: float
+    ) -> LLMResponse:
+        index = sum(1 for m in messages if m.role == "assistant")
+        if index >= len(self._steps):
+            return final("The scripted demo has no further steps.")
+        step = self._steps[index]
+        if isinstance(step, LLMResponse):
+            return step
+        if isinstance(step, Exception):
+            raise step
+        result = step(messages)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None:
+            raise ScriptExhaustedError(f"replay step {index} produced no response")
+        return result
+
+
 # ------------------------------------------------------------------ step builders
 
 _call_ids = itertools.count(1)

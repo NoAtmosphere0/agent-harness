@@ -35,7 +35,8 @@ class RunService:
         self._settings = settings
         self._model_name = model_name
         self._locks: dict[str, asyncio.Lock] = {}
-        self._tasks: set[asyncio.Task[RunStatus]] = set()
+        # Background advances and the run each one drives.
+        self._tasks: dict[asyncio.Task[RunStatus], str] = {}
         self._log = get_logger(component="run_service")
 
     async def create_run(
@@ -67,14 +68,14 @@ class RunService:
         """Advance in the background, so an API request can return immediately."""
         task = asyncio.create_task(self.advance(run_id), name=f"advance:{run_id}")
         # asyncio only keeps weak references to tasks; hold one until it is done.
-        self._tasks.add(task)
+        self._tasks[task] = run_id
         task.add_done_callback(self._on_task_done)
         return task
 
     async def drain(self) -> None:
         """Wait until no background advance is running (tests, shutdown)."""
         while self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
     async def cancel(self, run_id: str) -> RunRecord:
         """Cancel a run that has not finished.
@@ -98,8 +99,27 @@ class RunService:
         )
         return cancelled
 
+    async def shutdown(self) -> None:
+        """Stop background advances and fail the runs they were driving (§12).
+
+        A run interrupted mid-tick cannot be resumed safely (resume-after-crash is
+        out of scope), so it is marked FAILED/internal_error with message "shutdown"
+        rather than left in RUNNING. Runs waiting for approval are not in flight
+        and stay resumable.
+        """
+        in_flight = {task: run_id for task, run_id in self._tasks.items() if not task.done()}
+        for task in in_flight:
+            task.cancel()
+        await asyncio.gather(*in_flight, return_exceptions=True)
+        # Only runs whose advance() was actually cut short; a task that finished on
+        # its own (e.g. it just paused for approval) left its run in a valid state.
+        interrupted = {run_id for task, run_id in in_flight.items() if task.cancelled()}
+        for run_id in sorted(interrupted):
+            status = await self._loop.fail_run(run_id, error_type="Shutdown", message="shutdown")
+            self._log.warning("run_interrupted_by_shutdown", run_id=run_id, status=status)
+
     def _on_task_done(self, task: asyncio.Task[RunStatus]) -> None:
-        self._tasks.discard(task)
+        self._tasks.pop(task, None)
         if not task.cancelled() and (error := task.exception()) is not None:
             # advance() already turns run failures into FAILED runs; reaching this
             # means even that failed (e.g. the database is gone).

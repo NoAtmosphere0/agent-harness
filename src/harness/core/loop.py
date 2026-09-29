@@ -542,6 +542,15 @@ class AgentLoop:
 
     async def _fail_internal(self, run_id: str, error: Exception) -> RunStatus:
         self._log.error("run_internal_error", run_id=run_id, exc_info=error)
+        return await self.fail_run(run_id, error_type=type(error).__name__, message=str(error))
+
+    async def fail_run(self, run_id: str, *, error_type: str, message: str) -> RunStatus:
+        """Mark an unfinished run FAILED with reason ``internal_error``.
+
+        Used for unexpected exceptions and, by ``RunService.shutdown``, for runs whose
+        advance() was interrupted by a shutdown (§12). A run that already finished
+        is left alone.
+        """
         self._faults.clear_run(run_id)
         run = await self._repo.get_run(run_id)
         if run is None or run.status in TERMINAL_STATUSES:
@@ -564,8 +573,8 @@ class AgentLoop:
             run.step_count,
             status=RunStatus.FAILED,
             reason=TerminationReason.INTERNAL_ERROR,
-            error_type=type(error).__name__,
-            message=str(error),
+            error_type=error_type,
+            message=message,
         )
         return RunStatus.FAILED
 

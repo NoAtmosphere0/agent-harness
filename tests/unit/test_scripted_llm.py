@@ -3,6 +3,7 @@ import pytest
 from harness.domain.errors import LLMProviderError
 from harness.llm.base import ChatMessage, LLMResponse
 from harness.llm.scripted import (
+    ReplayLLM,
     ScriptedLLM,
     ScriptExhaustedError,
     call,
@@ -86,3 +87,40 @@ async def test_checkout_script_final_answer_reports_incident_id():
 
     assert isinstance(response, LLMResponse)
     assert "opened INC-000007" in (response.text or "")
+
+
+# ------------------------------------------------------------------ ReplayLLM
+
+
+def _assistant(n: int) -> list[ChatMessage]:
+    return [ChatMessage(role="assistant", content=f"a{i}") for i in range(n)]
+
+
+async def test_replay_llm_picks_step_by_assistant_turns():
+    async def third(messages: list[ChatMessage]) -> LLMResponse:
+        return final("three")
+
+    llm = ReplayLLM([final("one"), lambda messages: final("two"), third])
+
+    answers = [(await llm.complete(_assistant(n), [], timeout_s=5)).text for n in (0, 1, 2)]
+
+    assert answers == ["one", "two", "three"]
+    # Stateless: asking again for turn 0 replays turn 0.
+    assert (await llm.complete([], [], timeout_s=5)).text == "one"
+
+
+async def test_replay_llm_finishes_after_script_ends():
+    llm = ReplayLLM([final("only")])
+
+    response = await llm.complete(_assistant(3), [], timeout_s=5)
+
+    assert response.text == "The scripted demo has no further steps."
+
+
+async def test_replay_llm_raises_scripted_exception_and_rejects_empty_step():
+    llm = ReplayLLM([LLMProviderError("503", retryable=True), lambda messages: None])
+
+    with pytest.raises(LLMProviderError):
+        await llm.complete([], [], timeout_s=5)
+    with pytest.raises(ScriptExhaustedError, match="no response"):
+        await llm.complete(_assistant(1), [], timeout_s=5)

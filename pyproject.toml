@@ -19,6 +19,9 @@ dependencies = [
     "rank-bm25>=0.2.2",
 ]
 
+[project.scripts]
+harness = "harness.cli:app"
+
 [dependency-groups]
 dev = [
     "pytest>=8.2",
