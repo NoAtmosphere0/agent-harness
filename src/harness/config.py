@@ -11,9 +11,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from harness.domain.errors import InvalidConfigOverridesError
 from harness.tools.faults import Fault, parse_faults
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -64,6 +65,12 @@ class Settings(BaseSettings):
     allow_fault_overrides: bool = True
     mock_seed: int = 42
 
+    @field_validator("mock_faults")
+    @classmethod
+    def _check_faults(cls, value: dict[str, Any]) -> dict[str, Any]:
+        parse_faults(value)  # fail at startup, not on the first run
+        return value
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -73,7 +80,7 @@ def get_settings() -> Settings:
 
 # ---------------------------------------------------------------- per-run config
 
-# Hard caps for per-run overrides (PLAN §8.7): one request cannot buy an unbounded run.
+# Absolute caps (PLAN §8.7), applied even to the env values in case of operator error.
 HARD_MAX_STEPS = 50
 HARD_MAX_RUN_SECONDS = 600.0
 
@@ -114,27 +121,49 @@ class RunConfig(BaseModel):
 def build_run_config(
     settings: Settings, model_name: str, overrides: ConfigOverrides | None = None
 ) -> RunConfig:
-    """Merge settings and overrides; limits are clamped to the hard caps.
+    """Apply per-run overrides to the operator's settings.
 
-    Raises ``ValueError`` for fault overrides when ``ALLOW_FAULT_OVERRIDES`` is off,
-    or for an invalid fault config.
+    P8: the env values are the ceiling. The API has no authentication, so a caller
+    may lower a limit for its own run but never raise one; trying to raises
+    ``InvalidConfigOverridesError`` (422), as do fault overrides when disabled.
     """
     overrides = overrides or ConfigOverrides()
-    if overrides.faults is not None and not settings.allow_fault_overrides:
-        raise ValueError("fault overrides are disabled (ALLOW_FAULT_OVERRIDES=false)")
-    raw_faults = overrides.faults if overrides.faults is not None else settings.mock_faults
+    max_steps = _lowered("max_steps", min(settings.max_steps, HARD_MAX_STEPS), overrides.max_steps)
+    max_run_seconds = _lowered(
+        "max_run_seconds",
+        min(settings.max_run_seconds, HARD_MAX_RUN_SECONDS),
+        overrides.max_run_seconds,
+    )
+    faults = parse_faults(settings.mock_faults)
+    if overrides.faults is not None:
+        if not settings.allow_fault_overrides:
+            raise InvalidConfigOverridesError(
+                "fault overrides are disabled (ALLOW_FAULT_OVERRIDES=false)"
+            )
+        try:
+            faults = parse_faults(overrides.faults)
+        except ValueError as exc:
+            raise InvalidConfigOverridesError(f"invalid faults: {exc}") from exc
     return RunConfig(
         provider=settings.llm_provider,
         model=model_name,
-        max_steps=min(overrides.max_steps or settings.max_steps, HARD_MAX_STEPS),
-        max_run_seconds=min(
-            overrides.max_run_seconds or settings.max_run_seconds, HARD_MAX_RUN_SECONDS
-        ),
+        max_steps=int(max_steps),
+        max_run_seconds=float(max_run_seconds),
         max_parse_retries=settings.max_parse_retries,
         max_consecutive_tool_errors=settings.max_consecutive_tool_errors,
         repeat_call_limit=settings.repeat_call_limit,
         llm_timeout_seconds=settings.llm_timeout_seconds,
         llm_max_retries=settings.llm_max_retries,
         observation_max_chars=settings.observation_max_chars,
-        faults=parse_faults(raw_faults),
+        faults=faults,
     )
+
+
+def _lowered(name: str, ceiling: float, requested: float | None) -> float:
+    if requested is None:
+        return ceiling
+    if requested > ceiling:
+        raise InvalidConfigOverridesError(
+            f"{name} may only be lowered: requested {requested:g}, limit is {ceiling:g}"
+        )
+    return requested

@@ -257,6 +257,21 @@ class Repository:
             )
             return count or 0
 
+    async def find_rejected_call(self, run_id: str, args_hash: str) -> ToolCallRecord | None:
+        """The first call with exactly these arguments that a human rejected in this run."""
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(ToolCallRow)
+                .where(
+                    ToolCallRow.run_id == run_id,
+                    ToolCallRow.args_hash == args_hash,
+                    ToolCallRow.status == ToolCallStatus.REJECTED,
+                )
+                .order_by(ToolCallRow.id)
+                .limit(1)
+            )
+            return ToolCallRecord.model_validate(row) if row else None
+
     async def list_tool_calls(self, run_id: str) -> list[ToolCallRecord]:
         async with self._sessions() as session:
             rows = await session.scalars(

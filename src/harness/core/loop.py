@@ -53,6 +53,7 @@ from harness.domain.models import (
     RunRecord,
     RunStatus,
     TerminationReason,
+    ToolCallRecord,
     ToolCallStatus,
     ToolErrorInfo,
 )
@@ -334,6 +335,12 @@ class AgentLoop:
             )
 
         if spec.requires_approval:
+            # P3: a human's rejection is enforced in code, not only by the prompt. The
+            # exact call they rejected is refused again without asking them twice.
+            rejected = await self._repo.find_rejected_call(run.id, args_hash)
+            if rejected is not None:
+                await self._refuse_rejected_call(active, call, spec, canonical_args, rejected)
+                return None
             # P3: the approval gate is enforced here, in code. Whatever the model
             # outputs, an approval-gated tool is only reached via _resolve_pending,
             # after a stored approval. P4: the approval is bound to this call id and
@@ -361,6 +368,37 @@ class AgentLoop:
             active, call.id, call.name, None, None, info, ToolCallStatus.NOT_EXECUTED
         )
         await self._emit(active, EventType.TOOL_INVALID_CALL, tool=call.name, error_type=info.type)
+
+    async def _refuse_rejected_call(
+        self,
+        active: _ActiveRun,
+        call: LLMToolCall,
+        spec: ToolSpec,
+        canonical_args: dict[str, Any],
+        rejected: ToolCallRecord,
+    ) -> None:
+        earlier = ToolErrorInfo.model_validate((rejected.result or {}).get("error", {}))
+        info = ToolErrorInfo(
+            type="ApprovalRejected",
+            message=f"a human already rejected this exact call: {earlier.message}",
+            retryable=False,
+        )
+        await self._answer_with_error(
+            active,
+            call.id,
+            spec.name,
+            canonical_args,
+            rejected.args_hash,
+            info,
+            ToolCallStatus.REJECTED,
+        )
+        await self._emit(
+            active,
+            EventType.TOOL_INVALID_CALL,
+            tool=spec.name,
+            error_type=info.type,
+            previously_rejected=True,
+        )
 
     async def _resolve_pending(self, active: _ActiveRun) -> None:
         """Carry out the human's decision on the paused call (PLAN §9.3)."""

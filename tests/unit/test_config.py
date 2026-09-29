@@ -12,6 +12,7 @@ from harness.config import (
     build_run_config,
     get_settings,
 )
+from harness.domain.errors import InvalidConfigOverridesError
 from harness.tools.faults import FlakyFault
 
 
@@ -81,12 +82,44 @@ def test_run_config_defaults_come_from_settings():
     assert config.faults == {}
 
 
-def test_run_config_overrides_are_clamped_to_hard_caps():
-    overrides = ConfigOverrides(max_steps=99, max_run_seconds=5000)
+def test_run_config_override_may_lower_limits():
+    overrides = ConfigOverrides(max_steps=3, max_run_seconds=30)
 
     config = build_run_config(Settings(_env_file=None), "m", overrides)
 
+    assert (config.max_steps, config.max_run_seconds) == (3, 30)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (ConfigOverrides(max_steps=13), "max_steps may only be lowered: requested 13, limit is 12"),
+        (ConfigOverrides(max_run_seconds=121), "max_run_seconds may only be lowered"),
+    ],
+)
+def test_run_config_override_cannot_raise_env_limits(overrides: ConfigOverrides, message: str):
+    with pytest.raises(InvalidConfigOverridesError, match=message):
+        build_run_config(Settings(_env_file=None), "m", overrides)
+
+
+def test_run_config_env_limits_are_capped():
+    settings = Settings(_env_file=None, max_steps=1000, max_run_seconds=10_000)
+
+    config = build_run_config(settings, "m")
+
     assert (config.max_steps, config.max_run_seconds) == (HARD_MAX_STEPS, HARD_MAX_RUN_SECONDS)
+
+
+def test_run_config_rejects_invalid_fault_override():
+    overrides = ConfigOverrides(faults={"get_service_status": {"mode": "explode"}})
+
+    with pytest.raises(InvalidConfigOverridesError, match="invalid faults"):
+        build_run_config(Settings(_env_file=None), "m", overrides)
+
+
+def test_settings_reject_invalid_mock_faults():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, mock_faults={"get_service_status": {"mode": "explode"}})
 
 
 def test_run_config_fault_override_replaces_env_faults():
@@ -101,7 +134,7 @@ def test_run_config_fault_override_replaces_env_faults():
 def test_run_config_rejects_fault_override_when_disabled():
     settings = Settings(_env_file=None, allow_fault_overrides=False)
 
-    with pytest.raises(ValueError, match="disabled"):
+    with pytest.raises(InvalidConfigOverridesError, match="disabled"):
         build_run_config(settings, "m", ConfigOverrides(faults={}))
 
 

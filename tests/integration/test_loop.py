@@ -5,7 +5,12 @@ import asyncio
 
 import pytest
 
-from harness.domain.errors import LLMProviderError, LLMTimeoutError, RunNotFoundError
+from harness.domain.errors import (
+    InvalidConfigOverridesError,
+    LLMProviderError,
+    LLMTimeoutError,
+    RunNotFoundError,
+)
 from harness.domain.models import (
     EventType,
     RunStatus,
@@ -361,14 +366,12 @@ async def test_repeated_identical_call_terminates(make_env: EnvFactory):
     assert limit_event.payload["args"] == same
 
 
-async def test_per_run_limits_are_clamped_to_hard_caps(make_env: EnvFactory):
+async def test_per_run_override_cannot_raise_operator_limit(make_env: EnvFactory):
     env = make_env([final("ok")])
-    run_id = await env.start(max_steps=500, max_run_seconds=10_000)
 
-    run = await env.get(run_id)
-
-    assert run.config["max_steps"] == 50
-    assert run.config["max_run_seconds"] == 600
+    with pytest.raises(InvalidConfigOverridesError):
+        await env.start(max_steps=13)
+    assert await env.repo.list_runs() == []
 
 
 # ------------------------------------------------------------------ control

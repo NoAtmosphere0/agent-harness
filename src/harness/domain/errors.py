@@ -126,3 +126,9 @@ class RunAlreadyTerminalError(ServiceError):
     """The run already finished; it can be neither cancelled nor updated."""
 
     code = "run_already_terminal"
+
+
+class InvalidConfigOverridesError(ServiceError):
+    """Per-run overrides that are not allowed, e.g. raising an operator limit (422)."""
+
+    code = "invalid_config_overrides"

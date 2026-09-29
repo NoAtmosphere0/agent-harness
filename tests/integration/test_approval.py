@@ -21,6 +21,7 @@ from harness.domain.models import (
     TerminationReason,
     ToolCallStatus,
 )
+from harness.llm.scripted import call, final, tool_calls
 from harness.observability.tracer import EventSink
 from tests.fixtures.scripts import (
     CHECKOUT_INCIDENT_ARGS,
@@ -164,6 +165,52 @@ async def test_approval_wait_not_counted_toward_run_time(make_env: EnvFactory):
 
     assert run.status is RunStatus.COMPLETED
     assert run.active_elapsed_ms < 60_000
+
+
+async def test_rejected_call_is_refused_without_new_approval(make_env: EnvFactory):
+    investigate_and_propose = checkout_outage_script()[:4]
+    env = make_env(
+        [
+            *investigate_and_propose,
+            tool_calls(call("create_incident", CHECKOUT_INCIDENT_ARGS)),  # the same call again
+            final("The approver declined; no incident was created."),
+        ]
+    )
+    run_id = await env.start()
+    await env.advance(run_id)
+
+    run = await env.decide(run_id, "reject", reason="not an incident yet")
+
+    # P3: the rejection is enforced in code; the human is not asked a second time.
+    assert run.status is RunStatus.COMPLETED
+    assert await env.incident_list() == []
+    assert (await env.event_types(run_id)).count(E.APPROVAL_REQUESTED) == 1
+    created = [c for c in await env.tool_calls(run_id) if c.tool_name == "create_incident"]
+    assert [c.status for c in created] == [ToolCallStatus.REJECTED, ToolCallStatus.REJECTED]
+    assert created[0].args_hash == created[1].args_hash
+    refused = (await env.observations(run_id))[-1]
+    assert refused["error"] == {
+        "type": "ApprovalRejected",
+        "message": "a human already rejected this exact call: not an incident yet",
+        "retryable": False,
+    }
+
+
+async def test_changed_call_after_rejection_needs_its_own_approval(make_env: EnvFactory):
+    downgraded = {**CHECKOUT_INCIDENT_ARGS, "severity": "SEV2"}
+    env = make_env([*checkout_outage_script()[:4], tool_calls(call("create_incident", downgraded))])
+    run_id = await env.start()
+    await env.advance(run_id)
+    first = await env.pending_approval(run_id)
+
+    run = await env.decide(run_id, "reject", reason="SEV1 is too high")
+
+    # P4: a different call is a different decision, so it pauses for a new approval.
+    assert run.status is RunStatus.WAITING_APPROVAL
+    second = await env.pending_approval(run_id)
+    assert second.id != first.id
+    assert second.args == downgraded
+    assert await env.incident_list() == []
 
 
 # ------------------------------------------------------------------ decide / resume races
