@@ -1,0 +1,37 @@
+[
+  {
+    "id": "status_check",
+    "objective": "What is the current status of auth-service?",
+    "expected_tools": ["get_service_status"],
+    "expects_incident": false,
+    "expected_severity": null
+  },
+  {
+    "id": "checkout_outage",
+    "objective": "Customers are reporting failed checkouts. Investigate checkout-api and open an incident if it is warranted.",
+    "expected_tools": ["search_knowledge_base", "get_service_status", "get_service_status", "create_incident"],
+    "expects_incident": true,
+    "expected_severity": ["SEV1", "SEV2"]
+  },
+  {
+    "id": "runbook_lookup",
+    "objective": "How do we mitigate database connection pool exhaustion?",
+    "expected_tools": ["search_knowledge_base"],
+    "expects_incident": false,
+    "expected_severity": null
+  },
+  {
+    "id": "unknown_service",
+    "objective": "Check the health of billing-service.",
+    "expected_tools": ["get_service_status"],
+    "expects_incident": false,
+    "expected_severity": null
+  },
+  {
+    "id": "maintenance_no_incident",
+    "objective": "notification-service is not sending emails. Should we open an incident?",
+    "expected_tools": ["get_service_status", "search_knowledge_base"],
+    "expects_incident": false,
+    "expected_severity": null
+  }
+]

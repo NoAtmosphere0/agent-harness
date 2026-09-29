@@ -1,0 +1,50 @@
+[
+  {
+    "service_name": "checkout-api",
+    "status": "degraded",
+    "error_rate_pct": 12.5,
+    "p95_latency_ms": 1850,
+    "last_checked": "2026-09-29T09:58:00Z",
+    "dependencies": ["payment-gateway", "inventory-service"]
+  },
+  {
+    "service_name": "payment-gateway",
+    "status": "outage",
+    "error_rate_pct": 96.8,
+    "p95_latency_ms": 30000,
+    "last_checked": "2026-09-29T09:58:00Z",
+    "dependencies": []
+  },
+  {
+    "service_name": "auth-service",
+    "status": "operational",
+    "error_rate_pct": 0.2,
+    "p95_latency_ms": 85,
+    "last_checked": "2026-09-29T09:58:00Z",
+    "dependencies": []
+  },
+  {
+    "service_name": "inventory-service",
+    "status": "operational",
+    "error_rate_pct": 0.4,
+    "p95_latency_ms": 120,
+    "last_checked": "2026-09-29T09:58:00Z",
+    "dependencies": []
+  },
+  {
+    "service_name": "notification-service",
+    "status": "maintenance",
+    "error_rate_pct": 0.0,
+    "p95_latency_ms": 0,
+    "last_checked": "2026-09-29T09:58:00Z",
+    "dependencies": []
+  },
+  {
+    "service_name": "search-api",
+    "status": "degraded",
+    "error_rate_pct": 0.3,
+    "p95_latency_ms": 2400,
+    "last_checked": "2026-09-29T09:58:00Z",
+    "dependencies": ["inventory-service"]
+  }
+]
