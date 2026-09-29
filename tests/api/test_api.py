@@ -43,7 +43,12 @@ def _error_code(response: httpx.Response) -> str:
 async def test_api_health(client: httpx.AsyncClient):
     response = await client.get("/health")
 
-    assert response.json() == {"status": "ok", "provider": "scripted", "model": "scripted"}
+    assert response.json() == {
+        "status": "ok",
+        "provider": "scripted",
+        "model": "scripted",
+        "note": "replays the checkout_outage demo regardless of objective",
+    }
 
 
 async def test_api_create_returns_202_then_run_reaches_approval(
@@ -63,6 +68,21 @@ async def test_api_wait_returns_at_waiting_approval(client: httpx.AsyncClient):
     run = await _waiting_run(client)
 
     assert run["step_count"] == 4
+    # Public view only: loop internals are in the trace, not on the run.
+    assert set(run) == {
+        "id",
+        "objective",
+        "status",
+        "termination_reason",
+        "final_answer",
+        "step_count",
+        "active_elapsed_ms",
+        "pending_approval",
+        "config",
+        "created_at",
+        "updated_at",
+        "completed_at",
+    }
     assert run["pending_approval"]["status"] == "pending"
     assert run["pending_approval"]["args"]["severity"] == "SEV1"
 
@@ -85,6 +105,7 @@ async def test_api_approve_completes_run_with_one_incident(
     incidents = (await client.get("/incidents")).json()
     assert [i["incident_id"] for i in incidents] == ["INC-000001"]
     assert "INC-000001" in final["final_answer"]
+    assert final["final_answer"].splitlines()[-1].startswith("(Scripted demo:")
 
 
 async def test_api_reject_completes_without_incident(
@@ -266,3 +287,23 @@ async def test_api_shutdown_fails_in_flight_runs(
     assert stored.termination_reason is TerminationReason.INTERNAL_ERROR
     finished = (await container.repo.list_events(run.id))[-1]
     assert finished.payload["message"] == "shutdown"
+
+
+async def test_api_internal_error_is_500_without_traceback(
+    container: Container, monkeypatch: pytest.MonkeyPatch
+):
+    async def broken() -> list[Any]:
+        raise RuntimeError("secret connection string in a stack frame")
+
+    monkeypatch.setattr(container.incidents, "list_incidents", broken)
+    # raise_app_exceptions=False: see the response a real client would get.
+    transport = httpx.ASGITransport(app=create_app(container), raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/incidents")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {"code": "internal_error", "message": "internal server error"}
+    }
+    assert "Traceback" not in response.text
+    assert "secret" not in response.text

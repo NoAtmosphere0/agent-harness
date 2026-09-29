@@ -1,4 +1,4 @@
-.PHONY: install lint format typecheck test check serve demo report
+.PHONY: install lint format typecheck test check serve demo demo-auto report
 
 install:
 	uv sync
@@ -24,6 +24,9 @@ serve:
 
 demo:
 	uv run harness demo
+
+demo-auto:
+	uv run harness demo --auto-approve
 
 report:
 	uv run weasyprint docs/report/report.html docs/report.pdf -s docs/report/style.css

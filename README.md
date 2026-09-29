@@ -18,6 +18,8 @@ make demo        # replay the checkout_outage scenario; you approve or reject th
 make serve       # REST API on http://127.0.0.1:8000 (docs at /docs)
 ```
 
+With the default `LLM_PROVIDER=scripted`, every run replays the checkout_outage demo regardless of its objective (`/health` says so too). `make demo-auto` approves automatically.
+
 `docs/postman_collection.json` walks through the API against `make serve`.
 
 ## Development

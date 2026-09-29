@@ -22,6 +22,7 @@ from harness.domain.models import (
     RunRecord,
     RunStatus,
 )
+from harness.llm.scripted import SCRIPTED_DEMO_NOTE
 from harness.tools.incidents import IncidentRecord
 from harness.wiring import Container
 
@@ -43,7 +44,8 @@ ContainerDep = Annotated[Container, Depends(_container)]
 
 @router.get("/health", response_model=HealthView, tags=["Health"])
 async def health(c: ContainerDep) -> HealthView:
-    return HealthView(provider=c.settings.llm_provider, model=c.llm.model_name)
+    note = SCRIPTED_DEMO_NOTE if c.settings.llm_provider == "scripted" else None
+    return HealthView(provider=c.settings.llm_provider, model=c.llm.model_name, note=note)
 
 
 @router.post(
@@ -141,4 +143,4 @@ async def _view(c: Container, run: RunRecord) -> RunView:
     pending = None
     if run.status is RunStatus.WAITING_APPROVAL and run.pending_tool_call:
         pending = await c.repo.get_approval(run.pending_tool_call.approval_id)
-    return RunView(**run.model_dump(), pending_approval=pending)
+    return RunView.from_run(run, pending)
