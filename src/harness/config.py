@@ -1,8 +1,8 @@
 """Process configuration, loaded from environment variables (and ``.env``).
 
 Every tunable in PLAN §14 lives here so there is one place to read the effective
-defaults. Per-run overrides (``config_overrides``) are applied on top of these by
-the run service and snapshotted onto the run, not written back here.
+defaults. Per-run overrides (``config_overrides``) are applied on top of them by
+``build_run_config`` and snapshotted onto the run as a ``RunConfig``.
 """
 
 from __future__ import annotations
@@ -11,8 +11,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from harness.tools.faults import Fault, parse_faults
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 LogFormat = Literal["json", "console"]
@@ -67,3 +69,72 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Process-wide settings, read once. Tests construct ``Settings`` directly instead."""
     return Settings()
+
+
+# ---------------------------------------------------------------- per-run config
+
+# Hard caps for per-run overrides (PLAN §8.7): one request cannot buy an unbounded run.
+HARD_MAX_STEPS = 50
+HARD_MAX_RUN_SECONDS = 600.0
+
+
+class ConfigOverrides(BaseModel):
+    """What a caller may change for a single run (``POST /runs`` ``config_overrides``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_steps: int | None = Field(default=None, ge=1)
+    max_run_seconds: float | None = Field(default=None, gt=0)
+    faults: dict[str, Any] | None = None
+
+
+class RunConfig(BaseModel):
+    """Effective settings for one run, stored on the run row (PLAN §10).
+
+    A run can pause for approval and resume much later, possibly after a restart
+    with different env vars. Reading limits from this snapshot instead of from
+    ``Settings`` keeps the run's behaviour fixed from start to finish (P2).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str
+    model: str
+    max_steps: int
+    max_run_seconds: float
+    max_parse_retries: int
+    max_consecutive_tool_errors: int
+    repeat_call_limit: int
+    llm_timeout_seconds: float
+    llm_max_retries: int
+    observation_max_chars: int
+    faults: dict[str, Fault]
+
+
+def build_run_config(
+    settings: Settings, model_name: str, overrides: ConfigOverrides | None = None
+) -> RunConfig:
+    """Merge settings and overrides; limits are clamped to the hard caps.
+
+    Raises ``ValueError`` for fault overrides when ``ALLOW_FAULT_OVERRIDES`` is off,
+    or for an invalid fault config.
+    """
+    overrides = overrides or ConfigOverrides()
+    if overrides.faults is not None and not settings.allow_fault_overrides:
+        raise ValueError("fault overrides are disabled (ALLOW_FAULT_OVERRIDES=false)")
+    raw_faults = overrides.faults if overrides.faults is not None else settings.mock_faults
+    return RunConfig(
+        provider=settings.llm_provider,
+        model=model_name,
+        max_steps=min(overrides.max_steps or settings.max_steps, HARD_MAX_STEPS),
+        max_run_seconds=min(
+            overrides.max_run_seconds or settings.max_run_seconds, HARD_MAX_RUN_SECONDS
+        ),
+        max_parse_retries=settings.max_parse_retries,
+        max_consecutive_tool_errors=settings.max_consecutive_tool_errors,
+        repeat_call_limit=settings.repeat_call_limit,
+        llm_timeout_seconds=settings.llm_timeout_seconds,
+        llm_max_retries=settings.llm_max_retries,
+        observation_max_chars=settings.observation_max_chars,
+        faults=parse_faults(raw_faults),
+    )

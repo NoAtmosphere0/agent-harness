@@ -2,19 +2,24 @@ import asyncio
 from datetime import UTC
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from harness.clock import FakeClock
+from harness.domain.errors import RunAlreadyTerminalError
 from harness.domain.models import (
+    ApprovalRecord,
     ApprovalStatus,
     EventType,
     PendingToolCall,
+    RunRecord,
     RunStatus,
     TerminationReason,
     ToolCallStatus,
 )
 from harness.store.repository import Repository
+from harness.store.tables import ApprovalRow
 
 # ------------------------------------------------------------------ runs
 
@@ -179,24 +184,78 @@ async def test_repository_records_invalid_tool_call_without_args(repo: Repositor
     assert call.error_type == "ToolArgumentsError"
 
 
-# ------------------------------------------------------------------ approvals
+# ------------------------------------------------------------------ pause / cancel / approvals
+
+_ARGS = {"title": "payment-gateway: outage", "description": "x" * 20, "severity": "SEV1"}
 
 
-async def test_repository_create_approval_is_pending_with_stored_args(repo: Repository):
+async def _paused_run(repo: Repository) -> tuple[RunRecord, ApprovalRecord]:
     run = await repo.create_run("objective", {})
-    args = {"title": "payment-gateway: outage", "severity": "SEV1"}
+    running = await repo.save_run(run.model_copy(update={"status": RunStatus.RUNNING}))
+    return await repo.pause_for_approval(
+        running.model_copy(update={"step_count": 4}),
+        tool_call_id="call_7",
+        tool_name="create_incident",
+        args=_ARGS,
+    )
 
-    approval = await repo.create_approval(run.id, "call_7", "create_incident", args)
 
+async def test_repository_pause_for_approval_links_run_and_approval(repo: Repository):
+    paused, approval = await _paused_run(repo)
+
+    stored_run = await repo.get_run(paused.id)
+    stored_approval = await repo.get_approval(approval.id)
+
+    assert stored_run == paused
+    assert stored_run.status is RunStatus.WAITING_APPROVAL
+    assert stored_run.step_count == 4
+    assert stored_run.pending_tool_call == PendingToolCall(
+        tool_call_id="call_7", tool_name="create_incident", args=_ARGS, approval_id=approval.id
+    )
+    assert stored_approval == approval
     assert approval.status is ApprovalStatus.PENDING
-    assert approval.args == args
-    assert approval.decided_at is None
-    assert await repo.get_approval(approval.id) == approval
+    assert approval.args == _ARGS
+
+
+async def test_repository_pause_on_cancelled_run_creates_no_approval(
+    repo: Repository, sessions: async_sessionmaker[AsyncSession]
+):
+    run = await repo.create_run("objective", {})
+    await repo.cancel_run(run.id)
+
+    with pytest.raises(RunAlreadyTerminalError):
+        await repo.pause_for_approval(run, tool_call_id="c", tool_name="create_incident", args={})
+
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(ApprovalRow)) == 0
+    stored = await repo.get_run(run.id)
+    assert stored is not None
+    assert stored.status is RunStatus.CANCELLED
+
+
+async def test_repository_save_run_refuses_to_overwrite_terminal_run(repo: Repository):
+    run = await repo.create_run("objective", {})
+    await repo.cancel_run(run.id)
+
+    with pytest.raises(RunAlreadyTerminalError):
+        await repo.save_run(run.model_copy(update={"status": RunStatus.RUNNING}))
+
+
+async def test_repository_cancel_run_only_once(repo: Repository, clock: FakeClock):
+    run = await repo.create_run("objective", {})
+
+    first = await repo.cancel_run(run.id)
+    second = await repo.cancel_run(run.id)
+
+    assert first is not None
+    assert first.status is RunStatus.CANCELLED
+    assert first.termination_reason is TerminationReason.CANCELLED_BY_USER
+    assert first.completed_at == clock.now_utc()
+    assert second is None
 
 
 async def test_repository_decide_approval_only_once(repo: Repository, clock: FakeClock):
-    run = await repo.create_run("objective", {})
-    approval = await repo.create_approval(run.id, "call_7", "create_incident", {})
+    run, approval = await _paused_run(repo)
     clock.advance(30)
 
     first = await repo.decide_approval(
@@ -216,12 +275,23 @@ async def test_repository_decide_approval_only_once(repo: Repository, clock: Fak
     assert stored.status is ApprovalStatus.APPROVED
 
 
+async def test_repository_decide_approval_requires_waiting_run(repo: Repository):
+    run, approval = await _paused_run(repo)
+    await repo.cancel_run(run.id)
+
+    result = await repo.decide_approval(run.id, approval.id, status=ApprovalStatus.APPROVED)
+
+    assert result is None
+    stored = await repo.get_approval(approval.id)
+    assert stored is not None
+    assert stored.status is ApprovalStatus.PENDING
+
+
 async def test_repository_concurrent_decisions_have_one_winner(
     file_sessions: async_sessionmaker[AsyncSession], clock: FakeClock
 ):
     repo = Repository(file_sessions, clock)
-    run = await repo.create_run("objective", {})
-    approval = await repo.create_approval(run.id, "c", "create_incident", {})
+    run, approval = await _paused_run(repo)
 
     results = await asyncio.gather(
         repo.decide_approval(run.id, approval.id, status=ApprovalStatus.APPROVED),
@@ -232,9 +302,8 @@ async def test_repository_concurrent_decisions_have_one_winner(
 
 
 async def test_repository_decide_approval_of_other_run_is_noop(repo: Repository):
-    run = await repo.create_run("objective", {})
-    other = await repo.create_run("other", {})
-    approval = await repo.create_approval(run.id, "c", "create_incident", {})
+    _, approval = await _paused_run(repo)
+    other, _ = await _paused_run(repo)
 
     result = await repo.decide_approval(other.id, approval.id, status=ApprovalStatus.APPROVED)
 

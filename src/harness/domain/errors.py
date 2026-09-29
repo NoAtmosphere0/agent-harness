@@ -94,3 +94,35 @@ def describe_validation_error(exc: ValidationError, max_errors: int = 5) -> str:
     if hidden > 0:
         parts.append(f"(+{hidden} more)")
     return "; ".join(parts)
+
+
+class ServiceError(HarnessError):
+    """A request the service layer refuses. ``code`` is the API error code (PLAN §12)."""
+
+    code: ClassVar[str] = "service_error"
+
+
+class RunNotFoundError(ServiceError):
+    code = "run_not_found"
+
+
+class ApprovalNotFoundError(ServiceError):
+    code = "approval_not_found"
+
+
+class ApprovalNotPendingError(ServiceError):
+    """The approval was already decided; the first decision stands."""
+
+    code = "approval_not_pending"
+
+
+class RunNotWaitingError(ServiceError):
+    """The run is no longer waiting for this approval (e.g. it was cancelled)."""
+
+    code = "run_not_waiting"
+
+
+class RunAlreadyTerminalError(ServiceError):
+    """The run already finished; it can be neither cancelled nor updated."""
+
+    code = "run_already_terminal"

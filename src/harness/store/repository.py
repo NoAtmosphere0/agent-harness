@@ -15,18 +15,23 @@ from pydantic_core import to_jsonable_python
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from harness.clock import Clock
+from harness.domain.errors import RunAlreadyTerminalError
 from harness.domain.models import (
+    TERMINAL_STATUSES,
     ApprovalRecord,
     ApprovalStatus,
     EventRecord,
     EventType,
     MessageRecord,
     MessageRole,
+    PendingToolCall,
     RunRecord,
     RunStatus,
     Severity,
+    TerminationReason,
     ToolCallRecord,
     ToolCallStatus,
 )
@@ -94,16 +99,87 @@ class Repository:
             return [RunRecord.model_validate(r) for r in rows]
 
     async def save_run(self, run: RunRecord) -> RunRecord:
-        """Persist the run's mutable fields; returns the run with a fresh ``updated_at``."""
+        """Persist the run's mutable fields; returns the run with a fresh ``updated_at``.
+
+        Refuses to overwrite a run that is already terminal in the database (raises
+        ``RunAlreadyTerminalError``). That is how a cancel made by another request
+        while the loop is mid-tick wins over the loop's next save.
+        """
         saved = run.model_copy(update={"updated_at": self._clock.now_utc()})
-        values = saved.model_dump(include=_RUN_MUTABLE_FIELDS | {"updated_at"})
+        async with self._sessions.begin() as session:
+            await self._update_active_run(session, saved)
+        return saved
+
+    async def pause_for_approval(
+        self, run: RunRecord, *, tool_call_id: str, tool_name: str, args: dict[str, Any]
+    ) -> tuple[RunRecord, ApprovalRecord]:
+        """Create the approval and park the run on it, in one transaction.
+
+        P2/P4: the approval, ``pending_tool_call`` and ``WAITING_APPROVAL`` become
+        visible together. A decision can therefore never find a pending approval on
+        a run that is not yet waiting for it, and a crash cannot leave one without
+        the other.
+        """
+        now = self._clock.now_utc()
+        approval = ApprovalRow(
+            id=str(uuid.uuid4()),
+            run_id=run.id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            args=args,
+            status=ApprovalStatus.PENDING,
+            requested_at=now,
+        )
+        paused = run.model_copy(
+            update={
+                "status": RunStatus.WAITING_APPROVAL,
+                "pending_tool_call": PendingToolCall(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    args=args,
+                    approval_id=approval.id,
+                ),
+                "updated_at": now,
+            }
+        )
+        async with self._sessions.begin() as session:
+            await self._update_active_run(session, paused)
+            session.add(approval)
+        return paused, ApprovalRecord.model_validate(approval)
+
+    async def cancel_run(self, run_id: str) -> RunRecord | None:
+        """Cancel a run unless it already finished. Returns ``None`` if it had.
+
+        A single conditional update, so it needs no run lock and cannot race with
+        the loop: whichever write lands first decides, and the loop's conditional
+        ``save_run`` then refuses to overwrite the cancellation.
+        """
+        now = self._clock.now_utc()
         async with self._sessions.begin() as session:
             result = await session.execute(
-                update(RunRow).where(RunRow.id == run.id).values(**values)
+                update(RunRow)
+                .where(RunRow.id == run_id, _run_is_active())
+                .values(
+                    status=RunStatus.CANCELLED,
+                    termination_reason=TerminationReason.CANCELLED_BY_USER,
+                    completed_at=now,
+                    updated_at=now,
+                )
             )
             if cast(CursorResult[Any], result).rowcount != 1:
-                raise LookupError(f"run {run.id} does not exist")
-        return saved
+                return None
+        return await self.get_run(run_id)
+
+    async def _update_active_run(self, session: AsyncSession, run: RunRecord) -> None:
+        values = run.model_dump(include=_RUN_MUTABLE_FIELDS | {"updated_at"})
+        result = await session.execute(
+            update(RunRow).where(RunRow.id == run.id, _run_is_active()).values(**values)
+        )
+        if cast(CursorResult[Any], result).rowcount == 1:
+            return
+        if await session.get(RunRow, run.id) is None:
+            raise LookupError(f"run {run.id} does not exist")
+        raise RunAlreadyTerminalError(f"run {run.id} already finished")
 
     # ------------------------------------------------------------------ messages
 
@@ -190,23 +266,6 @@ class Repository:
 
     # ------------------------------------------------------------------ approvals
 
-    async def create_approval(
-        self, run_id: str, tool_call_id: str, tool_name: str, args: dict[str, Any]
-    ) -> ApprovalRecord:
-        """P4: the approval is bound to one tool call and a copy of its validated args."""
-        row = ApprovalRow(
-            id=str(uuid.uuid4()),
-            run_id=run_id,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            args=args,
-            status=ApprovalStatus.PENDING,
-            requested_at=self._clock.now_utc(),
-        )
-        async with self._sessions.begin() as session:
-            session.add(row)
-        return ApprovalRecord.model_validate(row)
-
     async def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         async with self._sessions() as session:
             row = await session.get(ApprovalRow, approval_id)
@@ -221,11 +280,11 @@ class Repository:
         reason: str | None = None,
         decided_by: str | None = None,
     ) -> ApprovalRecord | None:
-        """Record a decision only if the approval is still pending.
+        """Record a decision only if the approval is pending and its run is waiting.
 
-        Returns ``None`` when it was already decided (or does not belong to the run):
-        the conditional ``WHERE status = 'pending'`` makes a second, concurrent
-        decision a no-op instead of overwriting the first.
+        Returns ``None`` otherwise: already decided, not this run's approval, or the
+        run is no longer waiting (e.g. cancelled). The conditional update makes a
+        second, concurrent decision a no-op instead of overwriting the first.
         """
         if status is ApprovalStatus.PENDING:
             raise ValueError("a decision must be approved or rejected")
@@ -236,6 +295,9 @@ class Repository:
                     ApprovalRow.id == approval_id,
                     ApprovalRow.run_id == run_id,
                     ApprovalRow.status == ApprovalStatus.PENDING,
+                    select(RunRow.id)
+                    .where(RunRow.id == run_id, RunRow.status == RunStatus.WAITING_APPROVAL)
+                    .exists(),
                 )
                 .values(
                     status=status,
@@ -271,6 +333,11 @@ class Repository:
                 select(EventRow).where(EventRow.run_id == run_id).order_by(EventRow.seq)
             )
             return [EventRecord.model_validate(r) for r in rows]
+
+
+def _run_is_active() -> ColumnElement[bool]:
+    """SQL condition: the run has not reached a terminal status."""
+    return RunRow.status.not_in([s.value for s in TERMINAL_STATUSES])
 
 
 async def _next_seq(

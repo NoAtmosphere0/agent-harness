@@ -5,12 +5,20 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from harness.clock import FakeClock
+from harness.config import Settings
 from harness.observability.tracer import Tracer
 from harness.store.db import create_engine, create_session_factory, init_db
 from harness.store.repository import Repository, SqlIncidentStore
 from tests.fakes import InMemoryIncidentStore, RecordingEvents
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate every test from the developer's shell environment (e.g. MAX_STEPS)."""
+    for name in Settings.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
 
 
 @pytest.fixture
