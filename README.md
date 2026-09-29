@@ -1,6 +1,6 @@
 # Agent Harness
 
-Implemented with Claude Code from a design spec I wrote; architecture, safety design and trade-off decisions are my own.
+Implemented and documented with Claude Code from a design spec I wrote; architecture, safety design and trade-off decisions are my own.
 
 A hand-written LLM ↔ tool loop for an operations assistant. You give it an objective ("customers report failed checkouts: investigate, and open an incident if warranted"); it searches a knowledge base, checks service status and, **only after a human approves the exact call**, creates an incident. Every step is persisted and traced.
 
