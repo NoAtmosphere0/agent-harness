@@ -6,12 +6,20 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from harness.clock import FakeClock
 from harness.config import Settings
+from harness.observability.logging import configure_logging
 from harness.observability.tracer import Tracer
 from harness.store.db import create_engine, create_session_factory, init_db
 from harness.store.repository import Repository, SqlIncidentStore
 from tests.fakes import InMemoryIncidentStore, RecordingEvents
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True, scope="session")
+def json_logging() -> None:
+    """Configure structlog as the app does. Unconfigured, structlog's dev renderer
+    formats exception tracebacks with rich, which is slow and noisy in tests."""
+    configure_logging("WARNING", "json")
 
 
 @pytest.fixture(autouse=True)

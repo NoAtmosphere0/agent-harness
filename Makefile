@@ -1,4 +1,4 @@
-.PHONY: install lint format typecheck test check serve demo demo-auto report
+.PHONY: install lint format typecheck test test-live check serve demo demo-auto report
 
 install:
 	uv sync
@@ -15,7 +15,11 @@ typecheck:
 	uv run mypy
 
 test:
-	uv run pytest --cov --cov-report=term-missing
+	uv run pytest -m "not live" --cov --cov-report=term-missing
+
+# Optional: runs data/scenarios.json against the configured real model.
+test-live:
+	uv run pytest -m live -q
 
 check: lint typecheck test
 
@@ -28,5 +32,10 @@ demo:
 demo-auto:
 	uv run harness demo --auto-approve
 
+# Rendered in Docker (Pango + WeasyPrint) so it works the same on every host OS.
+# MSYS_NO_PATHCONV stops Git Bash on Windows from rewriting the container paths.
+report: export MSYS_NO_PATHCONV := 1
 report:
-	uv run weasyprint docs/report/report.html docs/report.pdf -s docs/report/style.css
+	docker build -q -t agent-harness-report docs/report
+	docker run --rm -v "$(CURDIR)/docs:/docs" agent-harness-report \
+		/docs/report/report.html /docs/report.pdf -s /docs/report/style.css

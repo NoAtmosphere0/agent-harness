@@ -18,7 +18,7 @@
 
 /* --- Base Typography --- */
 body {
-    font-family: 'Noto Sans CJK JP', 'Noto Sans JP', sans-serif;
+    font-family: 'Noto Sans', 'DejaVu Sans', sans-serif;
     font-size: 10.5pt;
     line-height: 1.6;
     color: #1a1a2e;

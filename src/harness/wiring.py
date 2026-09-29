@@ -14,8 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from harness.clock import Clock, SystemClock
 from harness.config import Settings
 from harness.core.loop import AgentLoop
-from harness.domain.errors import HarnessError
 from harness.llm.base import LLMClient
+from harness.llm.openai_compat import OpenAICompatLLM
 from harness.llm.scripted import ReplayLLM, checkout_outage_script
 from harness.observability.tracer import Tracer
 from harness.services.approval_service import ApprovalService
@@ -48,7 +48,7 @@ def build_llm(settings: Settings) -> LLMClient:
     if settings.llm_provider == "scripted":
         # No API key needed: every run replays the checkout_outage scenario.
         return ReplayLLM(checkout_outage_script())
-    raise HarnessError(f"LLM provider {settings.llm_provider!r} is not available in this build")
+    return OpenAICompatLLM.from_settings(settings)
 
 
 async def build_container(
